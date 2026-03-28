@@ -9,7 +9,7 @@ use rust_dbms::{
 };
 
 fn main() {
-    println!("IsentaDB v0.1.0");
+    println!("TridentaDB v0.1.0");
     println!("Type 'help' for commands, 'exit' to quit\n");
 
     // Initialize the query engine and parser from the library.
@@ -18,7 +18,7 @@ fn main() {
 
     // The REPL loop is now much simpler.
     loop {
-        print!("isenta> ");
+        print!("tridenta> ");
         io::stdout().flush().unwrap();
 
         let mut input = String::new();

@@ -11,11 +11,11 @@ path = "src/lib.rs"
 
 # The bin sections define the two executable crates.
 [[bin]]
-name = "isenta_db_cli"
+name = "tridenta_db_cli"
 path = "src/main.rs"
 
 [[bin]]
-name = "isenta_db_server"
+name = "tridenta_db_server"
 path = "src/bin/server.rs"
 
 [dependencies]

@@ -1,9 +1,9 @@
-# IsentaDB
+# TridentaDB
 
 ## Folder Structure
 
 ```yaml
-IsentaDB
+TridentaDB
 ├─ src/
 │   ├─ engine.rs
 │   ├─ main.rs
@@ -31,10 +31,10 @@ To run the project type this in your terminal:
 
 ```bash
 # CLI
-cargo run --bin isenta_db_cli
+cargo run --bin tridenta_db_cli
 
 # Server
-cargo run --bin isenta_db_server
+cargo run --bin tridenta_db_server
 
 # GUI
 npm run tauri dev
