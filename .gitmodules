@@ -1,0 +1,3 @@
+[submodule "Tridenta-SQL-Studio"]
+	path = Tridenta-SQL-Studio
+	url = https://github.com/Poseyeon/Tridenta-SQL-Studio.git
