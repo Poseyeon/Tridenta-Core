@@ -1,23 +1,6 @@
+<img src="https://raw.githubusercontent.com/Poseyeon/markdown/refs/heads/main/banners/tridenta.jpeg" alt="Tridenta">
+
 # TridentaDB
-
-## Folder Structure
-
-```yaml
-TridentaDB
-├─ src/
-│   ├─ engine.rs
-│   ├─ main.rs
-│   ├─ parser.rs
-│   ├─ storage.rs
-│   └─ wal.rs
-├─ target/
-├─ .gitignore
-├─ Cargo.lock
-├─ Cargo.toml
-├─ data.db
-├─ data.wal
-└─ README.md
-```
 
 ## Build and Run
 
@@ -36,12 +19,9 @@ cargo run --bin tridenta_db_cli
 # Server
 cargo run --bin tridenta_db_server
 
-# GUI
-npm run tauri dev
-```
+# Vite + React Frontend
+npm run dev
 
-To run the GUI run this:
-
-```bash
-npm run tauri dev
+# Electron App
+npm start
 ```
