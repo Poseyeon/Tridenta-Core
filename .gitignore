@@ -1,4 +1,6 @@
 /target
+tridenta_active.bin
+my_app.db
 data.db
 data.wal
 

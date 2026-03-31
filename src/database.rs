@@ -1,6 +1,8 @@
 use crate::engine::{Catalog, Row, Table};
 use crate::parser::Column;
 use crate::storage::{Page, StorageEngine};
+use std::fs;
+use std::io::Read;
 
 // Database file format constants
 const MAGIC_NUMBER: u64 = 0x4953454E54414442; // "ISENTADB" in hex
@@ -17,7 +19,26 @@ const TYPE_TEXT: u8 = 2;
 // Offset 8-11:  Version (u32)
 // Offset 12-19: Schema root page ID (u64)
 // Offset 20-23: Number of tables (u32)
-// Rest: Reserved
+// Offset 24:    Auth initialized flag (u8: 0/1)
+// Offset 25-28: Database name length (u32)
+// Offset 29-92: Database name (max 64 bytes)
+// Offset 93-96: Username length (u32)
+// Offset 97-160: Username (max 64 bytes)
+// Offset 161-164: Password length (u32)
+// Offset 165-292: Password (max 128 bytes)
+
+const ACTIVE_DB_FILE: &str = "tridenta_active.bin";
+const ACTIVE_DB_MAGIC: u32 = 0x54445241; // "TDRA"
+const AUTH_FLAG_OFFSET: usize = 24;
+const DB_NAME_LEN_OFFSET: usize = 25;
+const DB_NAME_OFFSET: usize = 29;
+const DB_NAME_MAX: usize = 64;
+const USERNAME_LEN_OFFSET: usize = 93;
+const USERNAME_OFFSET: usize = 97;
+const USERNAME_MAX: usize = 64;
+const PASSWORD_LEN_OFFSET: usize = 161;
+const PASSWORD_OFFSET: usize = 165;
+const PASSWORD_MAX: usize = 128;
 
 pub struct Database {
     storage: StorageEngine,
@@ -32,6 +53,116 @@ impl Database {
         db.initialize_if_needed()?;
 
         Ok(db)
+    }
+
+    pub fn configure_auth(
+        &mut self,
+        database_name: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), String> {
+        let mut header = self.storage.read_page(HEADER_PAGE_ID);
+
+        Self::write_string_field(
+            &mut header,
+            DB_NAME_LEN_OFFSET,
+            DB_NAME_OFFSET,
+            DB_NAME_MAX,
+            database_name,
+            "database name",
+        )?;
+        Self::write_string_field(
+            &mut header,
+            USERNAME_LEN_OFFSET,
+            USERNAME_OFFSET,
+            USERNAME_MAX,
+            username,
+            "username",
+        )?;
+        Self::write_string_field(
+            &mut header,
+            PASSWORD_LEN_OFFSET,
+            PASSWORD_OFFSET,
+            PASSWORD_MAX,
+            password,
+            "password",
+        )?;
+
+        header.data[AUTH_FLAG_OFFSET] = 1;
+        self.storage.write_page(&header);
+        Ok(())
+    }
+
+    pub fn auth_exists(&mut self) -> bool {
+        let header = self.storage.read_page(HEADER_PAGE_ID);
+        header.data[AUTH_FLAG_OFFSET] == 1
+    }
+
+    pub fn verify_login(&mut self, username: &str, password: &str) -> Result<bool, String> {
+        let header = self.storage.read_page(HEADER_PAGE_ID);
+        if header.data[AUTH_FLAG_OFFSET] != 1 {
+            return Ok(false);
+        }
+
+        let stored_username = Self::read_string_field(
+            &header,
+            USERNAME_LEN_OFFSET,
+            USERNAME_OFFSET,
+            USERNAME_MAX,
+            "username",
+        )?;
+        let stored_password = Self::read_string_field(
+            &header,
+            PASSWORD_LEN_OFFSET,
+            PASSWORD_OFFSET,
+            PASSWORD_MAX,
+            "password",
+        )?;
+
+        Ok(stored_username == username && stored_password == password)
+    }
+
+    fn write_string_field(
+        page: &mut Page,
+        len_offset: usize,
+        data_offset: usize,
+        max_len: usize,
+        value: &str,
+        label: &str,
+    ) -> Result<(), String> {
+        let bytes = value.as_bytes();
+        if bytes.is_empty() {
+            return Err(format!("{} must not be empty", label));
+        }
+        if bytes.len() > max_len {
+            return Err(format!("{} is too long (max {} bytes)", label, max_len));
+        }
+
+        page.data[len_offset..len_offset + 4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        page.data[data_offset..data_offset + max_len].fill(0);
+        page.data[data_offset..data_offset + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn read_string_field(
+        page: &Page,
+        len_offset: usize,
+        data_offset: usize,
+        max_len: usize,
+        label: &str,
+    ) -> Result<String, String> {
+        let len = u32::from_le_bytes(
+            page.data[len_offset..len_offset + 4]
+                .try_into()
+                .map_err(|_| format!("Failed to read {} length", label))?,
+        ) as usize;
+
+        if len == 0 || len > max_len {
+            return Err(format!("Invalid stored {} length", label));
+        }
+
+        String::from_utf8(page.data[data_offset..data_offset + len].to_vec())
+            .map_err(|_| format!("Invalid stored {} encoding", label))
     }
 
     fn initialize_if_needed(&mut self) -> Result<(), String> {
@@ -868,4 +999,94 @@ impl Database {
             self.save_table(table, true)
         }
     }
+}
+
+pub fn write_active_database_path(path: &str) -> Result<(), String> {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() {
+        return Err("Active database path must not be empty".to_string());
+    }
+    if bytes.len() > u16::MAX as usize {
+        return Err("Active database path is too long".to_string());
+    }
+
+    let mut payload = Vec::with_capacity(6 + bytes.len());
+    payload.extend_from_slice(&ACTIVE_DB_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    payload.extend_from_slice(bytes);
+
+    fs::write(ACTIVE_DB_FILE, payload)
+        .map_err(|e| format!("Failed to write active database metadata: {}", e))
+}
+
+pub fn read_active_database_path() -> Option<String> {
+    let content = fs::read(ACTIVE_DB_FILE).ok()?;
+    if content.len() < 6 {
+        return None;
+    }
+
+    let magic = u32::from_le_bytes(content[0..4].try_into().ok()?);
+    if magic != ACTIVE_DB_MAGIC {
+        return None;
+    }
+
+    let len = u16::from_le_bytes(content[4..6].try_into().ok()?) as usize;
+    if content.len() < 6 + len || len == 0 {
+        return None;
+    }
+
+    String::from_utf8(content[6..6 + len].to_vec()).ok()
+}
+
+pub fn resolve_active_database_path() -> Option<String> {
+    if let Some(path) = read_active_database_path() {
+        if database_has_auth(&path) {
+            return Some(path);
+        }
+    }
+
+    let mut discovered: Vec<String> = fs::read_dir(".")
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension()?.to_str()? != "db" {
+                return None;
+            }
+            let candidate = path.to_string_lossy().to_string();
+            if database_has_auth(&candidate) {
+                Some(candidate)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    discovered.sort();
+    let selected = discovered.into_iter().next()?;
+    let _ = write_active_database_path(&selected);
+    Some(selected)
+}
+
+fn database_has_auth(path: &str) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+
+    let mut header = [0u8; 4096];
+    if file.read(&mut header).is_err() {
+        return false;
+    }
+
+    let magic = u64::from_le_bytes(match header[0..8].try_into() {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    });
+
+    if magic != MAGIC_NUMBER {
+        return false;
+    }
+
+    header[AUTH_FLAG_OFFSET] == 1
 }

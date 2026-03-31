@@ -9,6 +9,15 @@ pub struct WhereClause {
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
+    CreateDatabase {
+        name: String,
+        username: String,
+        password: String,
+    },
+    Login {
+        username: String,
+        password: String,
+    },
     CreateTable {
         name: String,
         columns: Vec<Column>,
@@ -59,7 +68,11 @@ impl Parser {
         let input = input.trim();
         let input_upper = input.to_uppercase();
 
-        if input_upper.starts_with("CREATE TABLE") {
+        if input_upper.starts_with("CREATE DATABASE") {
+            self.parse_create_database(input)
+        } else if input_upper.starts_with("LOGIN USER") {
+            self.parse_login(input)
+        } else if input_upper.starts_with("CREATE TABLE") {
             self.parse_create_table(input)
         } else if input_upper.starts_with("INSERT INTO") {
             self.parse_insert(input)
@@ -170,6 +183,98 @@ impl Parser {
             name: table_name,
             columns,
         }
+    }
+
+    fn parse_create_database(&self, input: &str) -> Command {
+        let compact = input
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+        let upper = compact.to_uppercase();
+
+        let db_prefix = "CREATE DATABASE ";
+        let user_marker = " WITH USER ";
+        let pass_marker = " SET PASSWORD ";
+
+        if !upper.starts_with(db_prefix.trim_end()) {
+            return Command::Unknown(input.to_string());
+        }
+
+        let rest = compact[db_prefix.len()..].trim();
+        let rest_upper = rest.to_uppercase();
+
+        let user_pos = match rest_upper.find(user_marker) {
+            Some(pos) => pos,
+            None => return Command::Unknown(input.to_string()),
+        };
+
+        let database_name = rest[..user_pos].trim().to_string();
+        if database_name.is_empty() {
+            return Command::Unknown(input.to_string());
+        }
+
+        let after_user = &rest[user_pos + user_marker.len()..];
+        let after_user_upper = after_user.to_uppercase();
+
+        let pass_pos = match after_user_upper.find(pass_marker) {
+            Some(pos) => pos,
+            None => return Command::Unknown(input.to_string()),
+        };
+
+        let username = after_user[..pass_pos].trim().to_string();
+        let password = after_user[pass_pos + pass_marker.len()..]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+
+        if username.is_empty() || password.is_empty() {
+            return Command::Unknown(input.to_string());
+        }
+
+        Command::CreateDatabase {
+            name: database_name,
+            username,
+            password,
+        }
+    }
+
+    fn parse_login(&self, input: &str) -> Command {
+        let compact = input
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+        let upper = compact.to_uppercase();
+        let prefix = "LOGIN USER ";
+        let pass_marker = " SET PASSWORD ";
+
+        if !upper.starts_with(prefix.trim_end()) {
+            return Command::Unknown(input.to_string());
+        }
+
+        let rest = compact[prefix.len()..].trim();
+        let rest_upper = rest.to_uppercase();
+        let pass_pos = match rest_upper.find(pass_marker) {
+            Some(pos) => pos,
+            None => return Command::Unknown(input.to_string()),
+        };
+
+        let username = rest[..pass_pos].trim().to_string();
+        let password = rest[pass_pos + pass_marker.len()..]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+
+        if username.is_empty() || password.is_empty() {
+            return Command::Unknown(input.to_string());
+        }
+
+        Command::Login { username, password }
     }
 
     fn parse_insert(&self, input: &str) -> Command {

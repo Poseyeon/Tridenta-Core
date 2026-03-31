@@ -15,6 +15,9 @@ fn main() {
     // Initialize the query engine and parser from the library.
     let mut query_engine = QueryEngine::new();
     let parser = Parser::new();
+    if !authenticate_cli(&mut query_engine, &parser) {
+        return;
+    }
 
     // The REPL loop is now much simpler.
     loop {
@@ -45,4 +48,67 @@ fn main() {
             }
         }
     }
+}
+
+fn authenticate_cli(query_engine: &mut QueryEngine, parser: &Parser) -> bool {
+    loop {
+        println!("Authentication required.");
+        println!("1) Initial setup (create database)");
+        println!("2) Login");
+        println!("3) Exit");
+
+        let choice = prompt("Select an option [1/2/3]: ");
+        let ok = match choice.trim() {
+            "1" => setup_flow(query_engine, parser),
+            "2" => login_flow(query_engine, parser),
+            "3" => return false,
+            _ => {
+                println!("Invalid option.");
+                false
+            }
+        };
+
+        if ok {
+            return true;
+        }
+    }
+}
+
+fn setup_flow(query_engine: &mut QueryEngine, parser: &Parser) -> bool {
+    let db_name = prompt("Database name: ");
+    let username = prompt("Username: ");
+    let password = prompt("Password: ");
+
+    let sql = format!(
+        "CREATE DATABASE {}\nWITH USER {}\nSET PASSWORD {};",
+        db_name.trim(),
+        username.trim(),
+        password.trim()
+    );
+    let result = execute_line(&sql, query_engine, parser);
+    println!("{}", result);
+    result.to_lowercase().contains("created successfully")
+}
+
+fn login_flow(query_engine: &mut QueryEngine, parser: &Parser) -> bool {
+    let username = prompt("Username: ");
+    let password = prompt("Password: ");
+    let sql = format!(
+        "LOGIN USER {} SET PASSWORD {};",
+        username.trim(),
+        password.trim()
+    );
+    let result = execute_line(&sql, query_engine, parser);
+    println!("{}", result);
+    result.eq_ignore_ascii_case("Login successful")
+}
+
+fn prompt(label: &str) -> String {
+    print!("{}", label);
+    io::stdout().flush().unwrap();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return String::new();
+    }
+    input.trim().to_string()
 }

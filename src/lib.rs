@@ -51,6 +51,18 @@ pub fn execute_line(input: &str, query_engine: &mut QueryEngine, parser: &Parser
                 Err(e) => format!("Error: {}", e),
             }
         }
+        Command::CreateDatabase { name, username, password } => {
+            match create_database_with_user(&name, &username, &password) {
+                Ok(_) => format!("Database '{}' created successfully", name),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        Command::Login { username, password } => {
+            match login_user(&username, &password) {
+                Ok(_) => "Login successful".to_string(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
         Command::Insert { table, values } => {
             match query_engine.execute_insert(table.clone(), values) {
                 Ok(_) => format!("Inserted 1 row into '{}'", table),
@@ -136,7 +148,7 @@ pub fn execute_line(input: &str, query_engine: &mut QueryEngine, parser: &Parser
             }
         }
         Command::Unknown(cmd) => {
-            format!("Unknown command: {}\nType 'help' for available commands", cmd)
+            format!("Error: Unknown command: {}\nType 'help' for available commands", cmd)
         }
     }
 }
@@ -146,6 +158,8 @@ pub fn execute_line(input: &str, query_engine: &mut QueryEngine, parser: &Parser
 /// This is a helper function to avoid cluttering the main execution logic.
 fn print_help() -> String {
     "Available commands:\n".to_owned() +
+    "  CREATE DATABASE <name> WITH USER <username> SET PASSWORD <password> - Initialize database and credentials\n" +
+    "  LOGIN USER <username> SET PASSWORD <password> - Validate credentials\n" +
     "  CREATE TABLE <table_name> (col1 TYPE, col2 TYPE, ...) - Create a new table\n" +
     "  INSERT INTO <table_name> VALUES (val1, val2, ...) - Insert data into a table\n" +
     "  SELECT * FROM <table_name> - Query data from a table\n" +
@@ -157,4 +171,45 @@ fn print_help() -> String {
     "  SHOW TABLES - List all tables in the database\n" +
     "  help - Show this help message\n" +
     "  exit | quit - Exit the program"
+}
+
+fn create_database_with_user(name: &str, username: &str, password: &str) -> Result<(), String> {
+    if !is_valid_identifier(name) {
+        return Err("Invalid database name. Use only letters, numbers, '_' or '-'.".to_string());
+    }
+    if username.trim().is_empty() || password.trim().is_empty() {
+        return Err("Username and password must not be empty.".to_string());
+    }
+
+    let db_file = format!("{}.db", name);
+    let mut db = crate::database::Database::new(&db_file)?;
+    if db.auth_exists() {
+        return Err(format!("Database '{}' is already initialized.", name));
+    }
+    db.configure_auth(name, username, password)?;
+    crate::database::write_active_database_path(&db_file)?;
+
+    Ok(())
+}
+
+fn login_user(username: &str, password: &str) -> Result<(), String> {
+    let db_file = crate::database::resolve_active_database_path()
+        .unwrap_or_else(|| "data.db".to_string());
+    let mut db = crate::database::Database::new(&db_file)?;
+    if !db.auth_exists() {
+        return Err("Database has not been initialized yet.".to_string());
+    }
+
+    if db.verify_login(username, password)? {
+        Ok(())
+    } else {
+        Err("Invalid username or password.".to_string())
+    }
+}
+
+fn is_valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

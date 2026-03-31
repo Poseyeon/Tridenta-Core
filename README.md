@@ -19,6 +19,9 @@ cargo run --bin tridenta_db_cli
 # Server
 cargo run --bin tridenta_db_server
 
+# Frontend Directory
+cd Tridenta-SQL-Studio 
+
 # Vite + React Frontend
 npm run dev
 

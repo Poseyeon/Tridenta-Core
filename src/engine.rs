@@ -78,7 +78,9 @@ pub struct QueryEngine {
 
 impl QueryEngine {
     pub fn new() -> Self {
-        Self::with_database("data.db")
+        let db_path = crate::database::resolve_active_database_path()
+            .unwrap_or_else(|| "data.db".to_string());
+        Self::with_database(&db_path)
     }
 
     pub fn with_database(path: &str) -> Self {
