@@ -6,8 +6,18 @@ use std::io::Read;
 
 // Database file format constants
 const MAGIC_NUMBER: u64 = 0x4953454E54414442; // "ISENTADB" in hex
-const DB_VERSION: u32 = 1;
+/// v1 stored UTF-8 strings in plaintext in pages. v2 obfuscates all string payloads (binary).
+const DB_VERSION: u32 = 2;
 const HEADER_PAGE_ID: u64 = 0;
+
+// Salt tags for deterministic XOR keystream seeds (not encryption — storage obfuscation).
+const SALT_AUTH_DB_NAME: u32 = 0xA0_01;
+const SALT_AUTH_USERNAME: u32 = 0xA0_02;
+const SALT_AUTH_PASSWORD: u32 = 0xA0_03;
+const SALT_SCHEMA_TABLE_NAME: u32 = 0xB0_01;
+const SALT_SCHEMA_COL_NAME: u32 = 0xB0_02;
+const SALT_SCHEMA_COL_TYPE: u32 = 0xB0_03;
+const SALT_ROW_TEXT: u32 = 0xC0_00;
 
 // Value type tags for binary encoding
 const TYPE_NULL: u8 = 0;
@@ -28,7 +38,14 @@ const TYPE_TEXT: u8 = 2;
 // Offset 165-292: Password (max 128 bytes)
 
 const ACTIVE_DB_FILE: &str = "tridenta_active.bin";
-const ACTIVE_DB_MAGIC: u32 = 0x54445241; // "TDRA"
+/// Legacy active-db pointer (UTF-8 path written in plaintext after header).
+const ACTIVE_DB_MAGIC_V1: u32 = 0x54445241; // "TDRA"
+/// v2: path bytes are XOR-obfuscated (not human-readable in a hex editor).
+const ACTIVE_DB_MAGIC_V2: u32 = 0x54445242; // "TDRB"
+
+fn active_path_seed() -> u64 {
+    (ACTIVE_DB_MAGIC_V2 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (MAGIC_NUMBER ^ 0x5041_5448_5441_43)
+}
 const AUTH_FLAG_OFFSET: usize = 24;
 const DB_NAME_LEN_OFFSET: usize = 25;
 const DB_NAME_OFFSET: usize = 29;
@@ -40,8 +57,60 @@ const PASSWORD_LEN_OFFSET: usize = 161;
 const PASSWORD_OFFSET: usize = 165;
 const PASSWORD_MAX: usize = 128;
 
+fn blob_seed(page_id: u64, tag: u32, sub: u64) -> u64 {
+    MAGIC_NUMBER
+        ^ ((DB_VERSION as u64) << 32)
+        ^ page_id.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ ((tag as u64) << 20)
+        ^ sub
+}
+
+/// XOR obfuscation for stored string blobs. Symmetric: apply twice to recover.
+fn xor_obfuscate_buffer(buf: &mut [u8], mut seed: u64) {
+    for b in buf.iter_mut() {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *b ^= (seed >> 56) as u8;
+    }
+}
+
+fn row_text_seed_sub(row_index: usize, col_idx: usize) -> u64 {
+    (row_index as u64).wrapping_shl(24) ^ (col_idx as u64)
+}
+
 pub struct Database {
     storage: StorageEngine,
+}
+
+fn validate_db_file_version(header: &Page) -> Result<(), String> {
+    let magic = u64::from_le_bytes(
+        header.data[0..8]
+            .try_into()
+            .map_err(|_| "Failed to read magic number")?,
+    );
+    if magic != MAGIC_NUMBER {
+        return Ok(());
+    }
+    let version = u32::from_le_bytes(
+        header.data[8..12]
+            .try_into()
+            .map_err(|_| "Failed to read database version")?,
+    );
+    if version != DB_VERSION {
+        if version == 1 {
+            return Err(
+                "Legacy plaintext database format (v1) is no longer supported. \
+                 Create a new database with CREATE DATABASE and migrate any data manually."
+                    .to_string(),
+            );
+        }
+        return Err(format!(
+            "Unsupported database format version {} (expected {}).",
+            version, DB_VERSION
+        ));
+    }
+    Ok(())
 }
 
 impl Database {
@@ -70,6 +139,7 @@ impl Database {
             DB_NAME_MAX,
             database_name,
             "database name",
+            blob_seed(HEADER_PAGE_ID, SALT_AUTH_DB_NAME, 0),
         )?;
         Self::write_string_field(
             &mut header,
@@ -78,6 +148,7 @@ impl Database {
             USERNAME_MAX,
             username,
             "username",
+            blob_seed(HEADER_PAGE_ID, SALT_AUTH_USERNAME, 0),
         )?;
         Self::write_string_field(
             &mut header,
@@ -86,6 +157,7 @@ impl Database {
             PASSWORD_MAX,
             password,
             "password",
+            blob_seed(HEADER_PAGE_ID, SALT_AUTH_PASSWORD, 0),
         )?;
 
         header.data[AUTH_FLAG_OFFSET] = 1;
@@ -110,6 +182,7 @@ impl Database {
             USERNAME_OFFSET,
             USERNAME_MAX,
             "username",
+            blob_seed(HEADER_PAGE_ID, SALT_AUTH_USERNAME, 0),
         )?;
         let stored_password = Self::read_string_field(
             &header,
@@ -117,6 +190,7 @@ impl Database {
             PASSWORD_OFFSET,
             PASSWORD_MAX,
             "password",
+            blob_seed(HEADER_PAGE_ID, SALT_AUTH_PASSWORD, 0),
         )?;
 
         Ok(stored_username == username && stored_password == password)
@@ -129,6 +203,7 @@ impl Database {
         max_len: usize,
         value: &str,
         label: &str,
+        seed: u64,
     ) -> Result<(), String> {
         let bytes = value.as_bytes();
         if bytes.is_empty() {
@@ -141,6 +216,7 @@ impl Database {
         page.data[len_offset..len_offset + 4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
         page.data[data_offset..data_offset + max_len].fill(0);
         page.data[data_offset..data_offset + bytes.len()].copy_from_slice(bytes);
+        xor_obfuscate_buffer(&mut page.data[data_offset..data_offset + bytes.len()], seed);
         Ok(())
     }
 
@@ -150,6 +226,7 @@ impl Database {
         data_offset: usize,
         max_len: usize,
         label: &str,
+        seed: u64,
     ) -> Result<String, String> {
         let len = u32::from_le_bytes(
             page.data[len_offset..len_offset + 4]
@@ -161,8 +238,9 @@ impl Database {
             return Err(format!("Invalid stored {} length", label));
         }
 
-        String::from_utf8(page.data[data_offset..data_offset + len].to_vec())
-            .map_err(|_| format!("Invalid stored {} encoding", label))
+        let mut buf = page.data[data_offset..data_offset + len].to_vec();
+        xor_obfuscate_buffer(&mut buf, seed);
+        String::from_utf8(buf).map_err(|_| format!("Invalid stored {} encoding", label))
     }
 
     fn initialize_if_needed(&mut self) -> Result<(), String> {
@@ -196,6 +274,10 @@ impl Database {
                 .map_err(|_| "Failed to read magic number")?,
         );
 
+        if magic == MAGIC_NUMBER {
+            validate_db_file_version(&header)?;
+        }
+
         // Only overwrite if magic number is completely wrong (not just zero)
         // If magic is 0 but file has content, it might be corrupted - but don't auto-fix
         if magic != 0 && magic != MAGIC_NUMBER {
@@ -218,6 +300,7 @@ impl Database {
 
     pub fn load_catalog(&mut self) -> Result<Catalog, String> {
         let mut header = self.storage.read_page(HEADER_PAGE_ID);
+        validate_db_file_version(&header)?;
         let num_tables = u32::from_le_bytes(
             header.data[20..24]
                 .try_into()
@@ -318,8 +401,9 @@ impl Database {
             return Ok(None);
         }
 
-        let name = String::from_utf8(page.data[offset..offset + name_len].to_vec())
-            .map_err(|_| "Invalid table name encoding")?;
+        let mut name_buf = page.data[offset..offset + name_len].to_vec();
+        xor_obfuscate_buffer(&mut name_buf, blob_seed(page_id, SALT_SCHEMA_TABLE_NAME, 0));
+        let name = String::from_utf8(name_buf).map_err(|_| "Invalid table name encoding")?;
         offset += name_len;
 
         // Read number of columns
@@ -335,7 +419,7 @@ impl Database {
 
         // Read columns
         let mut columns = Vec::new();
-        for _ in 0..num_cols {
+        for col_idx in 0..num_cols {
             // Column name length and name
             if offset + 4 > page.data.len() {
                 return Ok(None);
@@ -350,8 +434,13 @@ impl Database {
             if offset + col_name_len > page.data.len() {
                 return Ok(None);
             }
-            let col_name = String::from_utf8(page.data[offset..offset + col_name_len].to_vec())
-                .map_err(|_| "Invalid column name encoding")?;
+            let mut col_name_buf = page.data[offset..offset + col_name_len].to_vec();
+            xor_obfuscate_buffer(
+                &mut col_name_buf,
+                blob_seed(page_id, SALT_SCHEMA_COL_NAME, col_idx as u64),
+            );
+            let col_name =
+                String::from_utf8(col_name_buf).map_err(|_| "Invalid column name encoding")?;
             offset += col_name_len;
 
             // Data type length and type
@@ -368,8 +457,13 @@ impl Database {
             if offset + type_len > page.data.len() {
                 return Ok(None);
             }
-            let data_type = String::from_utf8(page.data[offset..offset + type_len].to_vec())
-                .map_err(|_| "Invalid data type encoding")?;
+            let mut type_buf = page.data[offset..offset + type_len].to_vec();
+            xor_obfuscate_buffer(
+                &mut type_buf,
+                blob_seed(page_id, SALT_SCHEMA_COL_TYPE, col_idx as u64),
+            );
+            let data_type =
+                String::from_utf8(type_buf).map_err(|_| "Invalid data type encoding")?;
             offset += type_len;
 
             columns.push(Column {
@@ -401,7 +495,7 @@ impl Database {
 
         // Load rows from data pages
         let rows = if data_page_id > 0 {
-            self.load_rows_from_pages(data_page_id, &columns)?
+            self.load_rows_from_pages(data_page_id, &columns, 0)?
         } else {
             Vec::new()
         };
@@ -420,9 +514,11 @@ impl Database {
         &mut self,
         start_page_id: u64,
         columns: &[Column],
+        base_row_index: usize,
     ) -> Result<Vec<Row>, String> {
         let mut rows = Vec::new();
         let mut current_page_id = start_page_id;
+        let mut global_row = base_row_index;
 
         loop {
             let page = self.storage.read_page(current_page_id);
@@ -451,9 +547,10 @@ impl Database {
 
             // Read rows
             for _ in 0..num_rows {
+                let row_seed_index = global_row;
                 let mut row_values = Vec::new();
 
-                for _col in columns.iter() {
+                for (col_idx, _col) in columns.iter().enumerate() {
                     // Read value type tag
                     if offset + 1 > page.data.len() {
                         break;
@@ -498,8 +595,17 @@ impl Database {
                             if offset + text_len > page.data.len() {
                                 break;
                             }
-                            let value = String::from_utf8(page.data[offset..offset + text_len].to_vec())
-                                .map_err(|_| "Invalid text encoding")?;
+                            let mut buf = page.data[offset..offset + text_len].to_vec();
+                            xor_obfuscate_buffer(
+                                &mut buf,
+                                blob_seed(
+                                    current_page_id,
+                                    SALT_ROW_TEXT,
+                                    row_text_seed_sub(row_seed_index, col_idx),
+                                ),
+                            );
+                            let value =
+                                String::from_utf8(buf).map_err(|_| "Invalid text encoding")?;
                             offset += text_len;
                             row_values.push(value);
                         }
@@ -523,8 +629,17 @@ impl Database {
                             if offset + val_len > page.data.len() {
                                 break;
                             }
-                            let value = String::from_utf8(page.data[offset..offset + val_len].to_vec())
-                                .map_err(|_| "Invalid value encoding")?;
+                            let mut buf = page.data[offset..offset + val_len].to_vec();
+                            xor_obfuscate_buffer(
+                                &mut buf,
+                                blob_seed(
+                                    current_page_id,
+                                    SALT_ROW_TEXT,
+                                    row_text_seed_sub(row_seed_index, col_idx),
+                                ),
+                            );
+                            let value =
+                                String::from_utf8(buf).map_err(|_| "Invalid value encoding")?;
                             offset += val_len;
                             row_values.push(value);
                         }
@@ -533,6 +648,7 @@ impl Database {
 
                 if row_values.len() == columns.len() {
                     rows.push(Row { values: row_values });
+                    global_row += 1;
                 }
             }
 
@@ -593,8 +709,12 @@ impl Database {
                 break;
             }
 
-            let name = String::from_utf8(page.data[offset..offset + name_len].to_vec())
-                .map_err(|_| "Invalid table name encoding")?;
+            let mut name_buf = page.data[offset..offset + name_len].to_vec();
+            xor_obfuscate_buffer(
+                &mut name_buf,
+                blob_seed(current_page_id, SALT_SCHEMA_TABLE_NAME, 0),
+            );
+            let name = String::from_utf8(name_buf).map_err(|_| "Invalid table name encoding")?;
 
             if name.to_lowercase() == table_name.to_lowercase() {
                 return Ok(Some(current_page_id));
@@ -671,6 +791,7 @@ impl Database {
     pub fn save_table(&mut self, table: &Table, is_new: bool) -> Result<(), String> {
         // Save the table schema and data to pages
         let schema_page = self.storage.allocate_page();
+        let schema_page_id = schema_page.id;
         let mut page = Page::new(schema_page.id);
         let mut offset = 0;
 
@@ -682,6 +803,10 @@ impl Database {
         page.data[offset..offset + 4].copy_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         offset += 4;
         page.data[offset..offset + name_bytes.len()].copy_from_slice(name_bytes);
+        xor_obfuscate_buffer(
+            &mut page.data[offset..offset + name_bytes.len()],
+            blob_seed(schema_page_id, SALT_SCHEMA_TABLE_NAME, 0),
+        );
         offset += name_bytes.len();
 
         // Write number of columns
@@ -692,7 +817,7 @@ impl Database {
         offset += 4;
 
         // Write columns
-        for col in &table.columns {
+        for (col_idx, col) in table.columns.iter().enumerate() {
             let col_name_bytes = col.name.as_bytes();
             if offset + 4 + col_name_bytes.len() > page.data.len() {
                 return Err("Column name too long".to_string());
@@ -701,6 +826,10 @@ impl Database {
                 .copy_from_slice(&(col_name_bytes.len() as u32).to_le_bytes());
             offset += 4;
             page.data[offset..offset + col_name_bytes.len()].copy_from_slice(col_name_bytes);
+            xor_obfuscate_buffer(
+                &mut page.data[offset..offset + col_name_bytes.len()],
+                blob_seed(schema_page_id, SALT_SCHEMA_COL_NAME, col_idx as u64),
+            );
             offset += col_name_bytes.len();
 
             let type_bytes = col.data_type.as_bytes();
@@ -710,12 +839,16 @@ impl Database {
             page.data[offset..offset + 4].copy_from_slice(&(type_bytes.len() as u32).to_le_bytes());
             offset += 4;
             page.data[offset..offset + type_bytes.len()].copy_from_slice(type_bytes);
+            xor_obfuscate_buffer(
+                &mut page.data[offset..offset + type_bytes.len()],
+                blob_seed(schema_page_id, SALT_SCHEMA_COL_TYPE, col_idx as u64),
+            );
             offset += type_bytes.len();
         }
 
         // Allocate data page for rows
         let data_page = if !table.rows.is_empty() {
-            self.save_rows_to_pages(&table.rows, &table.columns, None)?
+            self.save_rows_to_pages(&table.rows, &table.columns, None, 0)?
         } else {
             self.storage.allocate_page()
         };
@@ -824,6 +957,7 @@ impl Database {
         rows: &[Row],
         columns: &[Column],
         start_page_id: Option<u64>,
+        base_row_index: usize,
     ) -> Result<Page, String> {
         let page_id = if let Some(id) = start_page_id {
             id
@@ -843,11 +977,12 @@ impl Database {
         offset += 4;
 
         // Write rows
-        for row in rows {
+        for (row_idx, row) in rows.iter().enumerate() {
+            let global_row = base_row_index + row_idx;
             let row_start_offset = offset;
 
             // Try to write the row
-            for (value, col) in row.values.iter().zip(columns.iter()) {
+            for (col_idx, (value, col)) in row.values.iter().zip(columns.iter()).enumerate() {
                 let col_type = col.data_type.to_uppercase();
 
                 // Write value type tag
@@ -882,6 +1017,14 @@ impl Database {
                                 .copy_from_slice(&(val_bytes.len() as u32).to_le_bytes());
                             offset += 4;
                             page.data[offset..offset + val_bytes.len()].copy_from_slice(val_bytes);
+                            xor_obfuscate_buffer(
+                                &mut page.data[offset..offset + val_bytes.len()],
+                                blob_seed(
+                                    page_id,
+                                    SALT_ROW_TEXT,
+                                    row_text_seed_sub(global_row, col_idx),
+                                ),
+                            );
                             offset += val_bytes.len();
                         }
                     }
@@ -897,6 +1040,14 @@ impl Database {
                         .copy_from_slice(&(val_bytes.len() as u32).to_le_bytes());
                     offset += 4;
                     page.data[offset..offset + val_bytes.len()].copy_from_slice(val_bytes);
+                    xor_obfuscate_buffer(
+                        &mut page.data[offset..offset + val_bytes.len()],
+                        blob_seed(
+                            page_id,
+                            SALT_ROW_TEXT,
+                            row_text_seed_sub(global_row, col_idx),
+                        ),
+                    );
                     offset += val_bytes.len();
                 }
             }
@@ -917,7 +1068,12 @@ impl Database {
 
         // If there are more rows, allocate next page and chain
         if rows.len() > rows_written {
-            let next_page = self.save_rows_to_pages(&rows[rows_written..], columns, None)?;
+            let next_page = self.save_rows_to_pages(
+                &rows[rows_written..],
+                columns,
+                None,
+                base_row_index + rows_written,
+            )?;
             if offset + 8 > page.data.len() {
                 return Err("Page overflow".to_string());
             }
@@ -983,9 +1139,14 @@ impl Database {
             
             // Update data pages, reusing the first page if possible
             let first_data_page = if existing_data_page_id > 0 {
-                self.save_rows_to_pages(&table.rows, &table.columns, Some(existing_data_page_id))?
+                self.save_rows_to_pages(
+                    &table.rows,
+                    &table.columns,
+                    Some(existing_data_page_id),
+                    0,
+                )?
             } else {
-                self.save_rows_to_pages(&table.rows, &table.columns, None)?
+                self.save_rows_to_pages(&table.rows, &table.columns, None, 0)?
             };
             
             // Update the schema page with the new data page ID
@@ -1010,10 +1171,13 @@ pub fn write_active_database_path(path: &str) -> Result<(), String> {
         return Err("Active database path is too long".to_string());
     }
 
-    let mut payload = Vec::with_capacity(6 + bytes.len());
-    payload.extend_from_slice(&ACTIVE_DB_MAGIC.to_le_bytes());
-    payload.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-    payload.extend_from_slice(bytes);
+    let mut body = bytes.to_vec();
+    xor_obfuscate_buffer(&mut body, active_path_seed());
+
+    let mut payload = Vec::with_capacity(6 + body.len());
+    payload.extend_from_slice(&ACTIVE_DB_MAGIC_V2.to_le_bytes());
+    payload.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&body);
 
     fs::write(ACTIVE_DB_FILE, payload)
         .map_err(|e| format!("Failed to write active database metadata: {}", e))
@@ -1026,16 +1190,21 @@ pub fn read_active_database_path() -> Option<String> {
     }
 
     let magic = u32::from_le_bytes(content[0..4].try_into().ok()?);
-    if magic != ACTIVE_DB_MAGIC {
-        return None;
-    }
-
     let len = u16::from_le_bytes(content[4..6].try_into().ok()?) as usize;
     if content.len() < 6 + len || len == 0 {
         return None;
     }
 
-    String::from_utf8(content[6..6 + len].to_vec()).ok()
+    let body = &content[6..6 + len];
+    match magic {
+        ACTIVE_DB_MAGIC_V2 => {
+            let mut buf = body.to_vec();
+            xor_obfuscate_buffer(&mut buf, active_path_seed());
+            String::from_utf8(buf).ok()
+        }
+        ACTIVE_DB_MAGIC_V1 => String::from_utf8(body.to_vec()).ok(),
+        _ => None,
+    }
 }
 
 pub fn resolve_active_database_path() -> Option<String> {
@@ -1085,6 +1254,14 @@ fn database_has_auth(path: &str) -> bool {
     });
 
     if magic != MAGIC_NUMBER {
+        return false;
+    }
+
+    let version = match header[8..12].try_into() {
+        Ok(b) => u32::from_le_bytes(b),
+        Err(_) => return false,
+    };
+    if version != DB_VERSION {
         return false;
     }
 

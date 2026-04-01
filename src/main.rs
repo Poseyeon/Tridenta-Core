@@ -12,12 +12,16 @@ fn main() {
     println!("TridentaDB v0.1.0");
     println!("Type 'help' for commands, 'exit' to quit\n");
 
-    // Initialize the query engine and parser from the library.
+    // Engine during auth is only needed for execute_line's signature; CREATE DATABASE / LOGIN
+    // open files themselves. A pre-auth engine often points at data.db, while setup switches
+    // the active DB to e.g. my_app.db — we must rebuild the engine after auth so the REPL uses
+    // the same file as tridenta_active.bin.
     let mut query_engine = QueryEngine::new();
     let parser = Parser::new();
     if !authenticate_cli(&mut query_engine, &parser) {
         return;
     }
+    query_engine = QueryEngine::new();
 
     // The REPL loop is now much simpler.
     loop {
