@@ -184,6 +184,29 @@ impl QueryEngine {
         Ok(())
     }
 
+    pub fn execute_insert_bulk(&mut self, table: String, values_list: Vec<Vec<String>>) -> Result<(), String> {
+        let table_ref = self
+            .catalog
+            .find_table_mut(&table)
+            .ok_or_else(|| format!("Table '{}' does not exist", table))?;
+
+        for values in values_list {
+            if values.len() != table_ref.columns.len() {
+                return Err(format!(
+                    "Column count mismatch: expected {}, got {}",
+                    table_ref.columns.len(),
+                    values.len()
+                ));
+            }
+            table_ref.rows.push(Row { values });
+        }
+        
+        // Save updated table to disk
+        let table_clone = table_ref.clone();
+        self.database.update_table_data(&table_clone)?;
+        Ok(())
+    }
+
     pub fn execute_select(&self, table_name: String, columns: Vec<String>, where_clause: Option<WhereClause>) -> Result<(Vec<String>, Vec<Row>), String> {
         let table = self
             .catalog
