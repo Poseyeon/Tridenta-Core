@@ -1,3 +1,6 @@
 [submodule "Tridenta-SQL-Studio"]
 	path = Tridenta-SQL-Studio
 	url = https://github.com/Poseyeon/Tridenta-SQL-Studio.git
+[submodule "Tridenta-VSCode-Extension"]
+	path = Tridenta-VSCode-Extension
+	url = https://github.com/Poseyeon/Tridenta-VSCode-Extension.git
